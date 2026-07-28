@@ -83,12 +83,28 @@ tools = [
 ]
 
 SYSTEM_PROMPT = f"""You are a data analyst agent with access to a Postgres
-database containing FIFA player data, roughly one table per FIFA game
-edition (around editions 15 through 22).
+database containing FIFA VIDEO GAME player data, roughly one table per
+FIFA game edition (around editions 15 through 22, e.g. Fifa_15 ... Fifa_22).
+
+SCOPE — READ CAREFULLY: This database contains player attributes and
+ratings from the FIFA video game series (overall rating, pace, wages,
+club, position, etc.) for each game edition. It does NOT contain:
+- Real-world match results, tournament outcomes, or World Cup winners
+- Real-world team standings, fixtures, or scores
+- Any data outside player/club attributes as rated in the video game
+
+If a question is about real-world football events (e.g. "who won the
+World Cup in 2022") rather than video game player data, do NOT attempt
+to query the database for it — you will not find it there. Instead,
+politely tell the user this database only covers FIFA video game
+player ratings/attributes (editions 15-22), not real-world match or
+tournament results, and ask if they'd like to ask something about
+player stats instead.
 
 IMPORTANT: You do not know the exact table names or column names yet,
-and table names may not match any casing you'd guess. Your FIRST query
-should always be to discover the real table names:
+and table names may not match any casing you'd guess. For questions
+that ARE in scope, your FIRST query should always be to discover the
+real table names:
   SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';
 
 Then, to see columns for a specific table (use the EXACT name returned
@@ -103,8 +119,15 @@ to sanity check).
 You may only run SELECT queries — you cannot modify data, and should
 not attempt to. Once you have enough information, give a clear, direct
 final answer in plain English — don't just dump raw rows, explain what
-they mean. If after several attempts you cannot find the right table,
-tell the user honestly what went wrong instead of retrying endlessly.
+they mean.
+
+CRITICAL RULE: You must ONLY answer using data actually returned by
+the query_database tool. If a query fails, errors out, or the database
+is unreachable, you must NOT fall back on your own general knowledge
+about FIFA or players. Instead, tell the user plainly and honestly
+that you could not retrieve the data and why (e.g. "the database
+connection failed"). Never present a guessed or remembered answer as
+if it came from the database.
 """
 
 
@@ -164,26 +187,34 @@ def run_agent(user_goal: str, status_area) -> str:
 # ── Streamlit UI ─────────────────────────────────────────────────
 st.set_page_config(page_title="FIFA Data Agent", page_icon="⚽")
 st.title("⚽ FIFA Data Agent")
-st.caption("Ask a question about FIFA player data (2015–2022) and the agent will query the database to answer it.")
+st.caption("Ask a question about FIFA **video game** player data (2015–2022) and the agent will query the database to answer it.")
+
+MAX_QUESTIONS_PER_SESSION = 10  # basic cost guardrail for a public app
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+if "question_count" not in st.session_state:
+    st.session_state.question_count = 0
 
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-user_input = st.chat_input("Ask something, e.g. 'Which club has the highest average wage in Fifa_22?'")
+if st.session_state.question_count >= MAX_QUESTIONS_PER_SESSION:
+    st.warning("You've reached the question limit for this session. Please refresh the page to start a new session.")
+else:
+    user_input = st.chat_input("Ask something, e.g. 'Which club has the highest average wage in Fifa_22?'")
 
-if user_input:
-    st.session_state.chat_history.append({"role": "user", "content": user_input})
-    with st.chat_message("user"):
-        st.write(user_input)
+    if user_input:
+        st.session_state.question_count += 1
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.write(user_input)
 
-    with st.chat_message("assistant"):
-        status_area = st.container()
-        with st.spinner("Thinking..."):
-            answer = run_agent(user_input, status_area)
-        st.write(answer)
+        with st.chat_message("assistant"):
+            status_area = st.container()
+            with st.spinner("Thinking..."):
+                answer = run_agent(user_input, status_area)
+            st.write(answer)
 
-    st.session_state.chat_history.append({"role": "assistant", "content": answer})
+        st.session_state.chat_history.append({"role": "assistant", "content": answer})
