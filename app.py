@@ -83,30 +83,39 @@ tools = [
 ]
 
 SYSTEM_PROMPT = f"""You are a data analyst agent with access to a Postgres
-database containing FIFA player data. The database has these tables,
-one per FIFA game edition: {", ".join(TABLE_NAMES)}.
+database containing FIFA player data, roughly one table per FIFA game
+edition (around editions 15 through 22).
 
-You do NOT know the exact column names yet. Before answering a
-question, if you're unsure of column names, first query
-information_schema.columns to check the schema of the relevant
-table(s), for example:
-  SELECT column_name FROM information_schema.columns WHERE table_name = 'Fifa_22';
+IMPORTANT: You do not know the exact table names or column names yet,
+and table names may not match any casing you'd guess. Your FIRST query
+should always be to discover the real table names:
+  SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';
 
-Table and column names are case-sensitive in this database — wrap
-them in double quotes in your SQL, e.g. SELECT * FROM "Fifa_22" LIMIT 5;
+Then, to see columns for a specific table (use the EXACT name returned
+above):
+  SELECT column_name FROM information_schema.columns WHERE table_name = 'fifa_19';
+
+If a query returns 0 rows or an error, do NOT repeat the exact same
+query again — change your approach (check the actual table name list
+again, try a different casing, or try SELECT * FROM tablename LIMIT 3
+to sanity check).
 
 You may only run SELECT queries — you cannot modify data, and should
-not attempt to. Run multiple queries if needed (e.g. explore schema,
-then query data, then refine). Once you have enough information, give
-a clear, direct final answer in plain English — don't just dump raw
-rows, explain what they mean.
+not attempt to. Once you have enough information, give a clear, direct
+final answer in plain English — don't just dump raw rows, explain what
+they mean. If after several attempts you cannot find the right table,
+tell the user honestly what went wrong instead of retrying endlessly.
 """
+
+
+MAX_ITERATIONS = 8  # hard safety cap so the agent can never loop forever
 
 
 def run_agent(user_goal: str, status_area) -> str:
     messages = [{"role": "user", "content": user_goal}]
+    seen_queries = set()
 
-    while True:
+    for iteration in range(MAX_ITERATIONS):
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=2000,
@@ -128,8 +137,16 @@ def run_agent(user_goal: str, status_area) -> str:
         tool_results = []
         for call in tool_calls:
             sql = call.input["sql"]
-            status_area.write(f"🔍 Running: `{sql}`")
-            result = query_database(sql)
+
+            # If it tries the exact same query again, don't run it — tell it to stop repeating
+            normalized = sql.strip().lower()
+            if normalized in seen_queries:
+                status_area.write(f"⚠️ Blocked repeated query: `{sql}`")
+                result = "You already ran this exact query with no new outcome. Try a different query or give your best answer with what you have so far."
+            else:
+                seen_queries.add(normalized)
+                status_area.write(f"🔍 Running: `{sql}`")
+                result = query_database(sql)
 
             tool_results.append(
                 {
@@ -140,6 +157,8 @@ def run_agent(user_goal: str, status_area) -> str:
             )
 
         messages.append({"role": "user", "content": tool_results})
+
+    return "I wasn't able to find a confident answer within my query limit. Try rephrasing your question, or it's possible the data needed isn't in the database."
 
 
 # ── Streamlit UI ─────────────────────────────────────────────────
