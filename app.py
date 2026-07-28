@@ -59,6 +59,44 @@ def query_database(sql: str) -> str:
         return f"SQL ERROR: {e}"
 
 
+@st.cache_resource(ttl=3600)  # re-check schema at most once per hour
+def get_database_schema() -> str:
+    """
+    Discovers all tables and their columns ONCE (cached across all users
+    and questions for up to an hour) instead of making the agent
+    rediscover this from scratch on every single question. This saves
+    tool-call round trips, tokens, and money.
+    """
+    try:
+        conn = psycopg2.connect(DB_CONNECTION_STRING)
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'public' ORDER BY table_name;
+        """)
+        table_names = [row[0] for row in cur.fetchall()]
+
+        schema_lines = []
+        for table in table_names:
+            cur.execute("""
+                SELECT column_name, data_type FROM information_schema.columns
+                WHERE table_name = %s ORDER BY ordinal_position;
+            """, (table,))
+            columns = cur.fetchall()
+            col_list = ", ".join(f"{c[0]} ({c[1]})" for c in columns)
+            schema_lines.append(f'Table "{table}": {col_list}')
+
+        cur.close()
+        conn.close()
+        return "\n".join(schema_lines)
+
+    except Exception as e:
+        # If schema discovery fails at startup, fall back to letting the
+        # agent discover it live per-question rather than crashing the app
+        return f"(Schema auto-discovery failed: {e}. Agent should discover schema manually via information_schema queries.)"
+
+
 tools = [
     {
         "name": "query_database",
@@ -82,9 +120,17 @@ tools = [
     }
 ]
 
-SYSTEM_PROMPT = f"""You are a data analyst agent with access to a Postgres
+
+def build_system_prompt(schema_text: str) -> str:
+    return f"""You are a data analyst agent with access to a Postgres
 database containing FIFA VIDEO GAME player data, roughly one table per
-FIFA game edition (around editions 15 through 22, e.g. Fifa_15 ... Fifa_22).
+FIFA game edition (around editions 15 through 22).
+
+Here is the ACTUAL current database schema (already discovered for you,
+you do NOT need to query information_schema — go straight to querying
+real data):
+
+{schema_text}
 
 SCOPE — READ CAREFULLY: This database contains player attributes and
 ratings from the FIFA video game series (overall rating, pace, wages,
@@ -94,27 +140,14 @@ club, position, etc.) for each game edition. It does NOT contain:
 - Any data outside player/club attributes as rated in the video game
 
 If a question is about real-world football events (e.g. "who won the
-World Cup in 2022") rather than video game player data, do NOT attempt
-to query the database for it — you will not find it there. Instead,
-politely tell the user this database only covers FIFA video game
-player ratings/attributes (editions 15-22), not real-world match or
-tournament results, and ask if they'd like to ask something about
-player stats instead.
+World Cup in 2022") rather than video game player data, do NOT query
+the database for it — you will not find it there. Instead, politely
+tell the user this database only covers FIFA video game player
+ratings/attributes, not real-world match or tournament results.
 
-IMPORTANT: You do not know the exact table names or column names yet,
-and table names may not match any casing you'd guess. For questions
-that ARE in scope, your FIRST query should always be to discover the
-real table names:
-  SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';
-
-Then, to see columns for a specific table (use the EXACT name returned
-above):
-  SELECT column_name FROM information_schema.columns WHERE table_name = 'fifa_19';
-
-If a query returns 0 rows or an error, do NOT repeat the exact same
-query again — change your approach (check the actual table name list
-again, try a different casing, or try SELECT * FROM tablename LIMIT 3
-to sanity check).
+Use the schema above directly — write SELECT queries against the exact
+table and column names shown. If a query returns 0 rows or an error, do
+NOT repeat the exact same query again — try a different approach.
 
 You may only run SELECT queries — you cannot modify data, and should
 not attempt to. Once you have enough information, give a clear, direct
@@ -135,6 +168,9 @@ MAX_ITERATIONS = 8  # hard safety cap so the agent can never loop forever
 
 
 def run_agent(user_goal: str, status_area) -> str:
+    schema_text = get_database_schema()  # cached — instant after first call
+    system_prompt = build_system_prompt(schema_text)
+
     messages = [{"role": "user", "content": user_goal}]
     seen_queries = set()
 
@@ -142,7 +178,7 @@ def run_agent(user_goal: str, status_area) -> str:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=2000,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             tools=tools,
             messages=messages,
         )
