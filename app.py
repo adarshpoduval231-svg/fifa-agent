@@ -164,6 +164,26 @@ if it came from the database.
 """
 
 
+def log_usage(session_id: str, question: str, answer: str):
+    """
+    Records each question asked (with timestamp) to the usage_logs table
+    in Supabase, so usage can be reviewed later via Table Editor or SQL.
+    This never blocks or breaks the app if logging fails.
+    """
+    try:
+        conn = psycopg2.connect(DB_CONNECTION_STRING)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO usage_logs (session_id, question, answer_preview) VALUES (%s, %s, %s);",
+            (session_id, question, answer[:300]),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass  # logging failures should never break the user-facing app
+
+
 MAX_ITERATIONS = 8  # hard safety cap so the agent can never loop forever
 
 
@@ -200,11 +220,10 @@ def run_agent(user_goal: str, status_area) -> str:
             # If it tries the exact same query again, don't run it — tell it to stop repeating
             normalized = sql.strip().lower()
             if normalized in seen_queries:
-                status_area.write(f"⚠️ Blocked repeated query: `{sql}`")
                 result = "You already ran this exact query with no new outcome. Try a different query or give your best answer with what you have so far."
             else:
                 seen_queries.add(normalized)
-                status_area.write(f"🔍 Running: `{sql}`")
+                status_area.write("🔍 Looking up data...")  # generic — SQL itself is not shown to end users
                 result = query_database(sql)
 
             tool_results.append(
@@ -225,12 +244,16 @@ st.set_page_config(page_title="FIFA Data Agent", page_icon="⚽")
 st.title("⚽ FIFA Data Agent")
 st.caption("Ask a question about FIFA **video game** player data (2015–2022) and the agent will query the database to answer it.")
 
+import uuid
+
 MAX_QUESTIONS_PER_SESSION = 10  # basic cost guardrail for a public app
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "question_count" not in st.session_state:
     st.session_state.question_count = 0
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())  # anonymous per-visit identifier, not a real identity
 
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
@@ -254,3 +277,4 @@ else:
             st.write(answer)
 
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
+        log_usage(st.session_state.session_id, user_input, answer)
